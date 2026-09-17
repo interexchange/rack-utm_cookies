@@ -78,8 +78,57 @@ describe Rack::UtmCookies do
       get(endpoint)
       expect(cookies.count).to eq(5)
       cookies.each do |c|
-        expect(c.domain).to eq('.example.com')
+        # RFC 6265 drops the leading dot, and rack-test normalises to match, so
+        # a cookie sent as domain=".example.com" reads back as "example.com".
+        expect(c.domain).to eq('example.com')
       end
     end
+  end
+
+  context 'with a non-ASCII utm value' do
+    let(:term) { 'séjour au pair' }
+    let(:endpoint) do
+      '/?utm_source=adwords&utm_medium=ppc&utm_campaign=fr&utm_term=' +
+        Rack::Utils.escape(term)
+    end
+
+    # The browser holds a utm_term cookie written raw by JavaScript, so the
+    # Cookie header the server hands Rack is ASCII-8BIT *and* carries non-ASCII
+    # bytes. That is the combination that used to raise; a header of pure ASCII
+    # concatenates with a UTF-8 value without complaint.
+    let(:returning_visitor) do
+      { 'HTTP_COOKIE' => "hubspotutk=abc; utm_term=#{ term }".dup.force_encoding(Encoding::ASCII_8BIT) }
+    end
+
+    it 'does not raise when the incoming cookie header is binary' do
+      expect { get(endpoint, {}, returning_visitor) }.not_to raise_error
+    end
+
+    it 'passes the value down the stack so it parses back unchanged' do
+      get(endpoint, {}, returning_visitor)
+      expect(Rack::Request.new(nested_rack_app.env).cookies['utm_term']).to eq(term)
+    end
+
+    it 'sets the response cookie to the value that was sent' do
+      get(endpoint, {}, returning_visitor)
+      expect(rack_mock_session.cookie_jar['utm_term']).to eq(term)
+    end
+  end
+
+  it 'keeps a "+" in a value from being read back as a space' do
+    get('/?utm_source=the_source&utm_medium=the_medium&utm_campaign=the_campaign&utm_term=' +
+      Rack::Utils.escape('a+b'))
+    expect(Rack::Request.new(nested_rack_app.env).cookies['utm_term']).to eq('a+b')
+  end
+
+  it 'does not let a ";" in a value splice an extra cookie into the header' do
+    # A crafted link is the whole input here: the value below arrived as a
+    # query parameter, and unescaped it ends the utm_campaign cookie and starts
+    # one the visitor never had.
+    get('/?utm_source=the_source&utm_medium=the_medium&utm_campaign=' +
+      Rack::Utils.escape('the_campaign; evil=pwned'))
+    downstream = Rack::Request.new(nested_rack_app.env).cookies
+    expect(downstream['utm_campaign']).to eq('the_campaign; evil=pwned')
+    expect(downstream).not_to have_key('evil')
   end
 end

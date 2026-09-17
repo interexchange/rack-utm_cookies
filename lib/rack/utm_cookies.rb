@@ -15,7 +15,16 @@ module Rack
       # the middleware stack for this current request
       env['HTTP_COOKIE'] = '' unless env['HTTP_COOKIE']
       utm_cookies_to_set(req).each do |name, value|
-        env['HTTP_COOKIE'] += "; #{name}=#{value}"
+        # HTTP_COOKIE arrives from the server as ASCII-8BIT; a value parsed
+        # out of the query string is UTF-8. Appending one to the other raised
+        # Encoding::CompatibilityError once both held non-ASCII bytes -- an ad
+        # click carrying utm_term "séjour au pair" to a browser that already
+        # held a raw utm_term cookie. Escaping makes the appended chunk
+        # ASCII-only. It also stops a value containing ";" from splicing an
+        # extra cookie into the header, and a value containing "+" from being
+        # read back as a space. set_cookie_header! below already escapes, so
+        # both sides of the round trip now unescape to the same value.
+        env['HTTP_COOKIE'] += "; #{name}=#{Rack::Utils.escape(value)}"
       end
 
       # pass the call down the middleware stack
